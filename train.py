@@ -20,6 +20,7 @@ from torch.nn import L1Loss
 
 import logging
 import sys
+import os
 
 DATASET = "/home/SSD/new_location/"
 
@@ -32,7 +33,7 @@ FMIN = 0
 FMAX = 8000
 HOP_SIZE = 256
 
-DEVICE = "cuda:0"
+DEVICE = "cuda:2"
 SEED = 3
 EPOCHS = 100
 LR_RATE = 0.0002
@@ -45,7 +46,9 @@ DECAY = 0.999
 DETERMINISTIC = False
 
 GENERATOR = generator_v2
-
+GENERATOR_PT_FILE = "hifigan_lj_v2.pt"#"g_02500000"
+LOAD_OPTIMIZER = False
+DISCRIMINATOR_PT_FILE = "do_02500000"
 
 def setup_logger(log_file="training.log"):
     logger = logging.getLogger("training_logger")
@@ -154,15 +157,15 @@ def train_one_epoch(
         scaler.step(optim_g)
         scaler.update()
 
-        scheduler_g.step()
-        scheduler_d.step()
-
         batch_size = audio.size(0)
         for loss_name, loss_value in [
             ("train_loss_disc_all", loss_disc_all),
             ("train_loss_gen_all", loss_gen_all),
         ]:
             total_losses[loss_name] += loss_value.item() * batch_size
+
+    scheduler_g.step()
+    scheduler_d.step()
 
     total_samples = len(train_loader.dataset)
     return {k: v / total_samples for k, v in total_losses.items()}
@@ -208,7 +211,37 @@ def val_one_epoch(generator, val_loader):
 
 def main():
     start_time = time.time()
+    
+    generator = GENERATOR().to(DEVICE)
+    mpd = MultiPeriodDiscriminator().to(DEVICE)
+    msd = MultiScaleDiscriminator().to(DEVICE)
+    logger.info(generator)
+    
+    optim_g = torch.optim.AdamW(generator.parameters(), LR_RATE, betas=BETAS)
+    optim_d = torch.optim.AdamW(
+        list(msd.parameters()) + list(mpd.parameters()),
+        LR_RATE,
+        betas=BETAS,
+    )
 
+    last_epoch = -1
+    if os.path.exists(DISCRIMINATOR_PT_FILE):
+        logger.info(f"Loading discriminator: {DISCRIMINATOR_PT_FILE}")
+        state_dict_do = torch.load(DISCRIMINATOR_PT_FILE, map_location=DEVICE)
+        mpd.load_state_dict(state_dict_do["mpd"])
+        msd.load_state_dict(state_dict_do["msd"])
+        if LOAD_OPTIMIZER:
+            optim_d.load_state_dict(state_dict_do["optim_d"])
+            optim_g.load_state_dict(state_dict_do["optim_g"])
+            last_epoch = state_dict_do["epoch"]
+    if os.path.exists(GENERATOR_PT_FILE):
+        logger.info(f"Loading generator: {GENERATOR_PT_FILE}")
+        state_dict_g = torch.load(GENERATOR_PT_FILE, map_location=DEVICE)
+        generator.load_state_dict(state_dict_g["generator"])
+
+    total_params = sum(p.numel() for p in generator.parameters() if p.requires_grad)
+    logger.info(f"Total trainable parameters: {total_params}")
+    
     train_files, val_files = collect_audio_files(DATASET, train_ratio=TRAIN_RATIO)
     logger.info(
         f"Training files: {len(train_files)}, validation files: {len(val_files)}"
@@ -269,28 +302,13 @@ def main():
         generator=g,
     )
 
-    generator = GENERATOR().to(DEVICE)
-    mpd = MultiPeriodDiscriminator().to(DEVICE)
-    msd = MultiScaleDiscriminator().to(DEVICE)
-    logger.info(generator)
-
-    total_params = sum(p.numel() for p in generator.parameters() if p.requires_grad)
-    logger.info(f"Total trainable parameters: {total_params}")
-
     scaler = torch.cuda.amp.GradScaler()
 
-    optim_g = torch.optim.AdamW(generator.parameters(), LR_RATE, betas=BETAS)
-    optim_d = torch.optim.AdamW(
-        list(msd.parameters()) + list(mpd.parameters()),
-        LR_RATE,
-        betas=BETAS,
-    )
-
     scheduler_g = torch.optim.lr_scheduler.ExponentialLR(
-        optim_g, gamma=DECAY, last_epoch=-1
+        optim_g, gamma=DECAY, last_epoch=last_epoch
     )
     scheduler_d = torch.optim.lr_scheduler.ExponentialLR(
-        optim_d, gamma=DECAY, last_epoch=-1
+        optim_d, gamma=DECAY, last_epoch=last_epoch
     )
 
     best_loss = float("inf")
