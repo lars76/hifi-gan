@@ -221,7 +221,7 @@ class MelDataset(torch.utils.data.Dataset):
 
 
 def collect_audio_files(
-    root_dir: str, train_ratio: float = 0.8, audio_extension: str = ".wav"
+    root_dir: str, train_ratio: float = 0.99, audio_extension: str = ".wav"
 ) -> Tuple[List[str], List[str]]:
     if not 0 < train_ratio < 1:
         raise ValueError("train_ratio must be between 0 and 1")
