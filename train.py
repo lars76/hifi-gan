@@ -7,7 +7,6 @@ from logging.handlers import RotatingFileHandler
 import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
-from env import AttrDict, build_env
 from meldataset import MelDataset, collect_audio_files, MelSpectrogramConverter
 from models import (
     Generator,
@@ -17,15 +16,48 @@ from models import (
     generator_loss,
     discriminator_loss,
 )
-from utils import scan_checkpoint, load_checkpoint, save_checkpoint
 from tqdm import tqdm
+import shutil
+from pathlib import Path
+from typing import Dict, Any
 
 
-# Setup logging
-def setup_logger(log_dir):
-    if not os.path.exists(log_dir):
-        os.makedirs(log_dir)
-    log_file = os.path.join(log_dir, "training.log")
+def load_checkpoint(filepath: str, device: torch.device) -> Dict[str, Any]:
+    filepath = Path(filepath)
+    if not filepath.is_file():
+        raise FileNotFoundError(f"Checkpoint file not found: {filepath}")
+    print(f"Loading checkpoint: {filepath}")
+    checkpoint_dict = torch.load(filepath, map_location=device)
+    print("Checkpoint loaded successfully.")
+    return checkpoint_dict
+
+
+def save_checkpoint(filepath: str, obj: Dict[str, Any]) -> None:
+    filepath = Path(filepath)
+    filepath.parent.mkdir(parents=True, exist_ok=True)
+    print(f"Saving checkpoint to: {filepath}")
+    torch.save(obj, filepath)
+    print("Checkpoint saved successfully.")
+
+
+class Config(dict):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.__dict__ = self
+
+
+def setup_training_environment(
+    config_path: str, config_name: str, output_path: str
+) -> None:
+    output_path = Path(output_path)
+    output_path.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(config_path, output_path / config_name)
+
+
+def setup_logger(log_dir: str) -> logging.Logger:
+    log_dir = Path(log_dir)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / "training.log"
     handler = RotatingFileHandler(log_file, maxBytes=2**20, backupCount=3)
     formatter = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
     handler.setFormatter(formatter)
@@ -44,25 +76,6 @@ def train(a, h):
     mpd = MultiPeriodDiscriminator().to(device)
     msd = MultiScaleDiscriminator().to(device)
 
-    logger.info(str(generator))
-    logger.info(f"Checkpoints directory: {a.checkpoint_path}")
-
-    cp_g = scan_checkpoint(a.checkpoint_path, "g_")
-    cp_do = scan_checkpoint(a.checkpoint_path, "do_")
-
-    steps = 0
-    if cp_g is None or cp_do is None:
-        state_dict_do = None
-        last_epoch = -1
-    else:
-        state_dict_g = load_checkpoint(cp_g, device)
-        state_dict_do = load_checkpoint(cp_do, device)
-        generator.load_state_dict(state_dict_g["generator"])
-        mpd.load_state_dict(state_dict_do["mpd"])
-        msd.load_state_dict(state_dict_do["msd"])
-        steps = state_dict_do["steps"]
-        last_epoch = state_dict_do["epoch"]
-
     optim_g = torch.optim.AdamW(
         generator.parameters(), h.learning_rate, betas=[h.adam_b1, h.adam_b2]
     )
@@ -72,9 +85,24 @@ def train(a, h):
         betas=[h.adam_b1, h.adam_b2],
     )
 
-    if state_dict_do is not None:
-        optim_g.load_state_dict(state_dict_do["optim_g"])
+    logger.info(str(generator))
+    logger.info(f"Checkpoints directory: {a.checkpoint_path}")
+
+    steps = 0
+    last_epoch = -1
+    if os.path.exists(a.pretrained_discriminator):
+        logger.info(f"Loading discriminator: {a.pretrained_discriminator}")
+        state_dict_do = load_checkpoint(a.pretrained_discriminator, device)
+        mpd.load_state_dict(state_dict_do["mpd"])
+        msd.load_state_dict(state_dict_do["msd"])
         optim_d.load_state_dict(state_dict_do["optim_d"])
+        steps = state_dict_do["steps"]
+        last_epoch = state_dict_do["epoch"]
+    if os.path.exists(a.pretrained_generator):
+        logger.info(f"Loading generator: {a.pretrained_generator}")
+        state_dict_g = load_checkpoint(a.pretrained_generator, device)
+        generator.load_state_dict(state_dict_g["generator"])
+        optim_g.load_state_dict(state_dict_do["optim_g"])
 
     scheduler_g = torch.optim.lr_scheduler.ExponentialLR(
         optim_g, gamma=h.lr_decay, last_epoch=last_epoch
@@ -290,28 +318,29 @@ def main():
         "--input_validation_file", default="LJSpeech-1.1/validation.txt"
     )
     parser.add_argument("--checkpoint_path", default="cp_hifigan")
+    parser.add_argument("--pretrained_discriminator", default="cp_hifigan/do_02500000")
+    parser.add_argument("--pretrained_generator", default="cp_hifigan/g_02500000")
     parser.add_argument("--config", default="")
     parser.add_argument("--training_epochs", default=100, type=int)
     parser.add_argument("--stdout_interval", default=5, type=int)
     parser.add_argument("--checkpoint_interval", default=5000, type=int)
     parser.add_argument("--summary_interval", default=100, type=int)
-    parser.add_argument("--validation_interval", default=1000, type=int)
+    parser.add_argument("--validation_interval", default=5000, type=int)
     parser.add_argument("--fine_tuning", default=False, type=bool)
 
-    a = parser.parse_args()
+    args = parser.parse_args()
 
-    with open(a.config) as f:
-        data = f.read()
+    with open(args.config) as f:
+        config_data = json.load(f)
 
-    json_config = json.loads(data)
-    h = AttrDict(json_config)
-    build_env(a.config, "config.json", a.checkpoint_path)
+    config = Config(config_data)
+    setup_training_environment(args.config, "config.json", args.checkpoint_path)
 
     torch.backends.cudnn.benchmark = True
-    torch.manual_seed(h.seed)
-    torch.cuda.manual_seed(h.seed)
+    torch.manual_seed(config.seed)
+    torch.cuda.manual_seed(config.seed)
 
-    train(a, h)
+    train(args, config)
 
 
 if __name__ == "__main__":
