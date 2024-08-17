@@ -2,8 +2,9 @@ import torch
 import torch.nn.functional as F
 import torch.nn as nn
 from torch.nn import Conv1d, ConvTranspose1d, AvgPool1d, Conv2d
-from torch.nn.utils import remove_weight_norm, spectral_norm
+from torch.nn.utils import spectral_norm
 from torch.nn.utils.parametrizations import weight_norm
+from torch.nn.utils.parametrize import remove_parametrizations
 
 LRELU_SLOPE = 0.1
 
@@ -12,7 +13,6 @@ def init_weights(m, mean=0.0, std=0.01):
     classname = m.__class__.__name__
     if classname.find("Conv") != -1:
         m.weight.data.normal_(mean, std)
-
 
 
 def get_padding(kernel_size, dilation=1):
@@ -105,9 +105,9 @@ class ResBlock1(torch.nn.Module):
 
     def remove_weight_norm(self):
         for l in self.convs1:
-            remove_weight_norm(l)
+            remove_parametrizations(l, "weight")
         for l in self.convs2:
-            remove_weight_norm(l)
+            remove_parametrizations(l, "weight")
 
 
 class ResBlock2(torch.nn.Module):
@@ -148,16 +148,32 @@ class ResBlock2(torch.nn.Module):
 
     def remove_weight_norm(self):
         for l in self.convs:
-            remove_weight_norm(l)
+            remove_parametrizations(l, "weight")
 
-            
+
 def generator_v1():
-    return Generator(resblock_type=1,resblock_kernel_sizes=[3, 7, 11],resblock_dilation_sizes=[[1, 3, 5], [1, 3, 5], [1, 3, 5]],
-                    upsample_rates=[8, 8, 2, 2],upsample_initial_channel=512,upsample_kernel_sizes=[16, 16, 4, 4],mels=80)
+    return Generator(
+        resblock_type=1,
+        resblock_kernel_sizes=[3, 7, 11],
+        resblock_dilation_sizes=[[1, 3, 5], [1, 3, 5], [1, 3, 5]],
+        upsample_rates=[8, 8, 2, 2],
+        upsample_initial_channel=512,
+        upsample_kernel_sizes=[16, 16, 4, 4],
+        mels=80,
+    )
+
 
 def generator_v2():
-    return Generator(resblock_type=1,resblock_kernel_sizes=[3, 7, 11],resblock_dilation_sizes=[[1, 3, 5], [1, 3, 5], [1, 3, 5]],
-                    upsample_rates=[8, 8, 2, 2],upsample_initial_channel=128,upsample_kernel_sizes=[16, 16, 4, 4],mels=80)
+    return Generator(
+        resblock_type=1,
+        resblock_kernel_sizes=[3, 7, 11],
+        resblock_dilation_sizes=[[1, 3, 5], [1, 3, 5], [1, 3, 5]],
+        upsample_rates=[8, 8, 2, 2],
+        upsample_initial_channel=128,
+        upsample_kernel_sizes=[16, 16, 4, 4],
+        mels=80,
+    )
+
 
 class Generator(torch.nn.Module):
     def __init__(
@@ -225,11 +241,11 @@ class Generator(torch.nn.Module):
     def remove_weight_norm(self):
         print("Removing weight norm...")
         for l in self.ups:
-            remove_weight_norm(l)
+            remove_parametrizations(l, "weight")
         for l in self.resblocks:
             l.remove_weight_norm()
-        remove_weight_norm(self.conv_pre)
-        remove_weight_norm(self.conv_post)
+        remove_parametrizations(self.conv_pre, "weight")
+        remove_parametrizations(self.conv_post, "weight")
 
 
 class DiscriminatorP(torch.nn.Module):
@@ -287,7 +303,9 @@ class DiscriminatorP(torch.nn.Module):
         b, c, t = x.shape
         if t % self.period != 0:  # pad first
             n_pad = self.period - (t % self.period)
-            x = F.pad(x, (0, n_pad), "reflect") #########################################
+            x = F.pad(
+                x, (0, n_pad), "reflect"
+            )  #########################################
             t = t + n_pad
         x = x.view(b, c, t // self.period, self.period)
 

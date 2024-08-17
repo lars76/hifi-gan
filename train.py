@@ -42,13 +42,15 @@ BATCH_SIZE = 32
 NUM_WORKERS = 4
 TRAIN_RATIO = 0.99
 DECAY = 0.999
+L1_WEIGHT = 45
 
 DETERMINISTIC = False
 
 GENERATOR = generator_v2
-GENERATOR_PT_FILE = "hifigan_lj_v2.pt"#"g_02500000"
+GENERATOR_PT_FILE = "hifigan_lj_v2.pt"  # "g_02500000"
 LOAD_OPTIMIZER = False
 DISCRIMINATOR_PT_FILE = "do_02500000"
+
 
 def setup_logger(log_file="training.log"):
     logger = logging.getLogger("training_logger")
@@ -93,8 +95,23 @@ def seed_worker(worker_id):
     random.seed(worker_seed)
 
 
+def check_nan(model):
+    for name, param in model.named_parameters():
+        if torch.isnan(param).any():
+            return True
+    return False
+
+
 def train_one_epoch(
-    generator, mpd, msd, train_loader, optim_d, optim_g, scaler, scheduler_g, scheduler_d
+    generator,
+    mpd,
+    msd,
+    train_loader,
+    optim_d,
+    optim_g,
+    scaler,
+    scheduler_g,
+    scheduler_d,
 ):
     generator.train()
     mpd.train()
@@ -123,13 +140,17 @@ def train_one_epoch(
             y_g_hat_mel = mel_converter_loss(y_g_hat)
 
             # MPD
-            y_df_hat_r, y_df_hat_g, _, _ = mpd(audio[:,None], y_g_hat.detach()[:,None])
+            y_df_hat_r, y_df_hat_g, _, _ = mpd(
+                audio[:, None], y_g_hat.detach()[:, None]
+            )
             loss_disc_f, losses_disc_f_r, losses_disc_f_g = discriminator_loss(
                 y_df_hat_r, y_df_hat_g
             )
 
             # MSD
-            y_ds_hat_r, y_ds_hat_g, _, _ = msd(audio[:,None], y_g_hat.detach()[:,None])
+            y_ds_hat_r, y_ds_hat_g, _, _ = msd(
+                audio[:, None], y_g_hat.detach()[:, None]
+            )
             loss_disc_s, losses_disc_s_r, losses_disc_s_g = discriminator_loss(
                 y_ds_hat_r, y_ds_hat_g
             )
@@ -139,14 +160,22 @@ def train_one_epoch(
         scaler.scale(loss_disc_all).backward()
         scaler.step(optim_d)
 
+        if check_nan(mpd) or check_nan(msd):
+            logger.error("NaN detected in discriminator parameters. Skipping batch.")
+            continue
+
         optim_g.zero_grad()
 
         with torch.cuda.amp.autocast(enabled=True, dtype=torch.float16):
             # L1 Mel-Spectrogram Loss
-            loss_mel = l1_loss(mel_for_loss, y_g_hat_mel) * 45
+            loss_mel = l1_loss(mel_for_loss, y_g_hat_mel) * L1_WEIGHT
 
-            y_df_hat_r, y_df_hat_g, fmap_f_r, fmap_f_g = mpd(audio[:,None], y_g_hat[:,None])
-            y_ds_hat_r, y_ds_hat_g, fmap_s_r, fmap_s_g = msd(audio[:,None], y_g_hat[:,None])
+            y_df_hat_r, y_df_hat_g, fmap_f_r, fmap_f_g = mpd(
+                audio[:, None], y_g_hat[:, None]
+            )
+            y_ds_hat_r, y_ds_hat_g, fmap_s_r, fmap_s_g = msd(
+                audio[:, None], y_g_hat[:, None]
+            )
             loss_fm_f = feature_loss(fmap_f_r, fmap_f_g)
             loss_fm_s = feature_loss(fmap_s_r, fmap_s_g)
             loss_gen_f, losses_gen_f = generator_loss(y_df_hat_g)
@@ -155,12 +184,26 @@ def train_one_epoch(
 
         scaler.scale(loss_gen_all).backward()
         scaler.step(optim_g)
+
+        if check_nan(generator):
+            logger.error("NaN detected in generator parameters. Skipping batch.")
+            continue
+
         scaler.update()
 
         batch_size = audio.size(0)
         for loss_name, loss_value in [
-            ("train_loss_disc_all", loss_disc_all),
+            # Generator losses
+            ("train_loss_gen_s", loss_gen_s),
+            ("train_loss_gen_f", loss_gen_f),
+            ("train_loss_fm_s", loss_fm_s),
+            ("train_loss_fm_f", loss_fm_f),
+            ("train_loss_mel", loss_mel),
             ("train_loss_gen_all", loss_gen_all),
+            # Discriminator losses
+            ("train_loss_disc_s", loss_disc_s),
+            ("train_loss_disc_f", loss_disc_f),
+            ("train_loss_disc_all", loss_disc_all),
         ]:
             total_losses[loss_name] += loss_value.item() * batch_size
 
@@ -211,12 +254,12 @@ def val_one_epoch(generator, val_loader):
 
 def main():
     start_time = time.time()
-    
+
     generator = GENERATOR().to(DEVICE)
     mpd = MultiPeriodDiscriminator().to(DEVICE)
     msd = MultiScaleDiscriminator().to(DEVICE)
     logger.info(generator)
-    
+
     optim_g = torch.optim.AdamW(generator.parameters(), LR_RATE, betas=BETAS)
     optim_d = torch.optim.AdamW(
         list(msd.parameters()) + list(mpd.parameters()),
@@ -241,7 +284,7 @@ def main():
 
     total_params = sum(p.numel() for p in generator.parameters() if p.requires_grad)
     logger.info(f"Total trainable parameters: {total_params}")
-    
+
     train_files, val_files = collect_audio_files(DATASET, train_ratio=TRAIN_RATIO)
     logger.info(
         f"Training files: {len(train_files)}, validation files: {len(val_files)}"
@@ -320,7 +363,15 @@ def main():
         epoch_info = {"epoch": epoch}
 
         epoch_info |= train_one_epoch(
-            generator, mpd, msd, train_loader, optim_d, optim_g, scaler, scheduler_g, scheduler_d
+            generator,
+            mpd,
+            msd,
+            train_loader,
+            optim_d,
+            optim_g,
+            scaler,
+            scheduler_g,
+            scheduler_d,
         )
         epoch_info |= val_one_epoch(generator, val_loader)
 
@@ -349,6 +400,11 @@ def main():
             }
         )
         logger.info(log_file[-1])
+
+        for k, v in epoch_info.items():
+            if np.isnan(v):
+                logger.error("Found NaN!")
+                break
 
     pd.DataFrame(log_file).to_csv("model.csv", index=False)
 

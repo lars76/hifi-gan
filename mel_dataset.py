@@ -80,7 +80,9 @@ class MelSpectrogramConverter:
         # Pad the signal
         pad_length = int((self.n_fft - self.hop_size) / 2)
         if y.size(1) > pad_length:
-            y = torch.nn.functional.pad(y, (pad_length, pad_length), mode="reflect")####################
+            y = torch.nn.functional.pad(
+                y, (pad_length, pad_length), mode="reflect"
+            )  ####################
         else:
             y = torch.nn.functional.pad(y, (0, self.n_fft), mode="constant")
 
@@ -92,7 +94,7 @@ class MelSpectrogramConverter:
             win_length=self.win_size,
             window=self.hann_window.to(y.device),
             center=False,
-            pad_mode="reflect",#######################
+            pad_mode="reflect",  #######################
             normalized=False,
             onesided=True,
             return_complex=True,
@@ -142,7 +144,9 @@ class MelDataset(torch.utils.data.Dataset):
         for filename in tqdm(training_files):
             audio = read_audio(filename, self.sampling_rate)
             if audio.shape[1] < self.segment_size:
-                print(f"Skipping {filename} because {audio.shape[1]} < {self.segment_size}")
+                print(
+                    f"Skipping {filename} because {audio.shape[1]} < {self.segment_size}"
+                )
                 continue
             self.audio_files.append(filename)
 
@@ -205,7 +209,9 @@ class MelDataset(torch.utils.data.Dataset):
         # Ensure all tensors have the same number of dimensions and same first dimension (if 2D)
         if not all(tensor.dim() == len(first_shape) for tensor in data):
             raise ValueError("All tensors must have the same number of dimensions.")
-        if len(first_shape) == 2 and not all(tensor.shape[0] == first_shape[0] for tensor in data):
+        if len(first_shape) == 2 and not all(
+            tensor.shape[0] == first_shape[0] for tensor in data
+        ):
             raise ValueError("All 2D tensors must have the same first dimension.")
 
         # Find the maximum length of the last dimension
@@ -213,7 +219,9 @@ class MelDataset(torch.utils.data.Dataset):
 
         # Pad the last dimension of each tensor
         padded_data = [
-            torch.nn.functional.pad(tensor, (0, max_len - tensor.shape[-1]), value=pad_value)
+            torch.nn.functional.pad(
+                tensor, (0, max_len - tensor.shape[-1]), value=pad_value
+            )
             for tensor in data
         ]
 
