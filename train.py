@@ -43,6 +43,7 @@ NUM_WORKERS = 4
 TRAIN_RATIO = 0.99
 DECAY = 0.999
 L1_WEIGHT = 45
+FINETUNE = True
 
 DETERMINISTIC = False
 
@@ -307,7 +308,7 @@ def main():
         FMAX,
         split=True,
         fmax_loss=None,
-        fine_tuning=False,
+        fine_tuning=FINETUNE,
     )
     train_loader = torch.utils.data.DataLoader(
         train_dataset,
@@ -332,7 +333,7 @@ def main():
         FMAX,
         split=False,
         fmax_loss=None,
-        fine_tuning=False,
+        fine_tuning=FINETUNE,
     )
     val_loader = torch.utils.data.DataLoader(
         val_dataset,

@@ -171,7 +171,7 @@ class MelDataset(torch.utils.data.Dataset):
 
             mel = self.mel_converter(audio)
         else:
-            mel = torch.load(filename.replace(".wav", ".pt"))
+            mel = torch.load(filename.replace(".wav", ".pt"), map_location="cpu").T
 
             if len(mel.shape) < 3:
                 mel = mel.unsqueeze(0)
